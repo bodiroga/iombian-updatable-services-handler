@@ -15,6 +15,53 @@ If there is a new version available of an installed service, it is represented l
 
 Whenever a new service version is added or the installed service version is updated, the updatable services changes.
 
+## Docker
+To build the docker image, from the cloned repository, execute the docker build command in the same level as the Dockerfile:
+
+```
+docker build -t ${IMAGE_NAME}:${IMAGE_VERSION} .
+```
+
+For example `docker build -t iombian-updatable-services-handler:latest .`
+
+After building the image, execute it with docker run:
+
+```
+docker run --name ${CONTAINER_NAME} --rm -d -e CONFIG_PORT=5555 iombian-updatable-services-handler:latest
+```
+
+- **--name** is used to define the name of the created container.
+- **--rm** can be used to delete the container when it stops. This parameter is optional.
+- **-d** is used to run the container detached. This way the container will run in the background. This parameter is optional.
+- **-e** can be used to define the environment variables:
+    - CONFIG_HOST: the host of the IoMBian Config File Handler.
+    Default value is "127.0.0.1".
+    - CONFIG_PORT: the port of the IoMBian Config File Handler.
+    Default value is 5555.
+    - LOG_LEVEL: define the log level for the python logger.
+    This can be DEBUG, INFO, WARN or ERROR.
+    Default value is INFO.
+
+Otherwise, a `docker-compose.yml` file can also be used to launch the container:
+
+```
+version: 3
+
+services:
+  iombian-updatable-services-handler:
+    image: iombian-updatable-services-handler:latest
+    container_name: iombian-updatable-services-handler
+    restart: unless_stopped
+    environment:
+      CONFIG_HOST: "iombian-config-file-handler"
+      CONFIG_PORT: 5555
+      LOG_LEVEL: "INFO"
+```
+
+```
+docker compose up -d
+```
+
 ## Author
 (c) 2024 IoMBian team ([Aitor Iturrioz Rodríguez](https://github.com/bodiroga), [Aitor Castaño Mesa](https://github.com/aitorcas23)).
 
