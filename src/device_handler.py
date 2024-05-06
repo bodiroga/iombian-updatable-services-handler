@@ -53,20 +53,26 @@ class DeviceHandler:
     def start(self):
         """Start the handler by listening to the installed services of the firestore device."""
         logger.info("Device Handler started.")
+        for service in self.installed_services:
+            service.start()
+
         self.watch = self.device.collection("installed_services").on_snapshot(
             self._on_new_installed_service
         )
 
     def stop(self):
-        logger.info("Device Handler stopped.")
         """Stop the handler by stopping the listener."""
+        logger.info("Device Handler stopped.")
+        for service in self.installed_services:
+            service.stop()
+
         if self.watch is not None:
             self.watch.unsubscribe()
 
     def restart(self):
-        """Restart the handler. This function just calls to `start()` and `stop()`."""
-        self.start()
+        """Restart the handler. This function just calls to `stop()` and `start()`."""
         self.stop()
+        self.start()
 
     def set_as_updated(self, service: str):
         """Set the given installed service as updated by removing it from the updatable services."""
