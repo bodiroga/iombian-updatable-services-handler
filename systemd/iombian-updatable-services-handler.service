@@ -1,0 +1,15 @@
+[Unit]
+Description=IoMBian Updatable Services Handler
+
+[Service]
+Type=simple
+User=iompi
+Restart=always
+RestartSec=5
+TimeoutStopSec=5
+
+WorkingDirectory=/opt/iombian-updatable-services-handler
+ExecStart=/opt/iombian-updatable-services-handler/.venv/bin/python /opt/iombian-updatable-services-handler/src/main.py
+
+[Install]
+WantedBy=multi-user.target
