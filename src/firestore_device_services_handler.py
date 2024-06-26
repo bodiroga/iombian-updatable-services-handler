@@ -1,73 +1,67 @@
 import logging
-from typing import Dict, List, Union
+import threading
+from typing import List
 
-from google.cloud.firestore_v1 import Client, DocumentReference, DocumentSnapshot, Watch
+from google.cloud.firestore_v1 import DocumentSnapshot
 from google.cloud.firestore_v1.watch import ChangeType, DocumentChange
 from proto.datetime_helpers import DatetimeWithNanoseconds
 
-from service_handler import ServiceHandler
+from firestore_client_handler import FirestoreClientHandler
+from firestore_service_update_handler import FirestoreServiceUpdateHandler
 
 logger = logging.getLogger(__name__)
 
 
-class DeviceHandler:
-    """Handler of the firestore device.
+class FirestoreDeviceServicesHandler(FirestoreClientHandler):
+    """Handler which listens to the installed services of a device and starts the corresponding `FirestoreServiceUpdateHandler` for each service."""
 
-    This class handles the installed services and updatable services of a device.
-    It creates a `ServiceHandler` for each installed service.
-    """
+    RESTART_DELAY_TIME_S = 0.5
 
-    client: Client
-    """Firestore database client."""
-    device: DocumentReference
-    """Reference to the firestore document of this device."""
-    installed_services: List[ServiceHandler]
-    """List of the installed services on the device."""
-    updatable_services: Dict[str, str]
-    """List of the updatable services of the device."""
-    watch: Union[Watch, None]
-    """The `watch` of the `on_snapshot` function."""
+    def __init__(
+        self,
+        api_key: str,
+        project_id: str,
+        refresh_token: str,
+        device_id: str,
+    ):
+        super().__init__(api_key, project_id, refresh_token)
+        self.api_key = api_key
+        self.project_id = project_id
+        self.refresh_token = refresh_token
 
-    def __init__(self, client: Client, user_id: str, device_id: str) -> None:
-        self.client = client
-        self.device = (
-            client.collection("users")
-            .document(user_id)
-            .collection("devices")
-            .document(device_id)
-        )
-        self.installed_services = []
-
-        document_dict = self.device.get().to_dict()
-        if document_dict is None or document_dict.get("updatable_services") is None:
-            self.updatable_services = {}
-        else:
-            updatable_services_dict = document_dict.get("updatable_services")
-            if updatable_services_dict is None:
-                self.updatable_services = {}
-            else:
-                self.updatable_services = updatable_services_dict
-
-        self.watch = None
+        self.device_id = device_id
+        self.installed_services: List[FirestoreServiceUpdateHandler] = []
+        self.updatable_services = {}
+        self.subscription = None
 
     def start(self):
-        """Start the handler by listening to the installed services of the firestore device."""
-        logger.info("Device Handler started.")
-        for service in self.installed_services:
-            service.start()
-
-        self.watch = self.device.collection("installed_services").on_snapshot(
-            self._on_new_installed_service
+        """Start the firestore client and the listener of the installed services."""
+        self.initialize_client()
+        self._sync_updatable_services()
+        self.device = (
+            self.client.collection("users")
+            .document(self.user_id)
+            .collection("devices")
+            .document(self.device_id)
         )
 
+        self.subscription = self.device.collection("installed_services").on_snapshot(
+            self._on_new_installed_service
+        )
+        logger.info("Device Services Handler started.")
+
     def stop(self):
-        """Stop the handler by stopping the listener."""
-        logger.info("Device Handler stopped.")
+        """Stop the handler by stopping the listener and the firestore client."""
+        logger.info("Device Services Handler stopped.")
         for service in self.installed_services:
             service.stop()
+        self.installed_services = []
 
-        if self.watch is not None:
-            self.watch.unsubscribe()
+        if self.subscription is not None:
+            self.subscription.unsubscribe()
+            self.subscription = None
+
+        self.stop_client()
 
     def restart(self):
         """Restart the handler. This function just calls to `stop()` and `start()`."""
@@ -90,6 +84,37 @@ class DeviceHandler:
             {"updatable_services": self.updatable_services},
             merge=True,
         )
+
+    def on_client_initialized(self):
+        """Callback function when the client is initialized."""
+        logger.debug("Firestore client initialized")
+
+    def on_server_not_responding(self):
+        """Callback function when the server is not responding."""
+        logger.error("Firestore server not responding")
+        threading.Timer(self.RESTART_DELAY_TIME_S, self.restart).start()
+
+    def on_token_expired(self):
+        """Callback function when the token is expired."""
+        logger.debug("Refreshing Firebase client token id")
+        threading.Timer(self.RESTART_DELAY_TIME_S, self.restart).start()
+
+    def _sync_updatable_services(self):
+        """Sync the local updatable_services with the updatable_services in firestore."""
+        device = (
+            self.client.collection("users")
+            .document(self.user_id)
+            .collection("devices")
+            .document(self.device_id)
+        )
+        document_dict = device.get().to_dict()
+        if (
+            document_dict is not None
+            and document_dict.get("updatable_services") is not None
+        ):
+            self.updatable_services = document_dict.get("updatable_services")
+        else:
+            self.updatable_services = {}
 
     def _get_service_by_name(self, service_name: str):
         """Get the installed service with the given name."""
@@ -128,7 +153,10 @@ class DeviceHandler:
 
             if change.type == ChangeType.ADDED:
                 logger.debug(f"New {service_name} service installed on device.")
-                service = ServiceHandler(self.client, installed_service, self)
+                service = FirestoreServiceUpdateHandler(
+                    installed_service,
+                    self,
+                )
                 self.installed_services.append(service)
                 service.start()
 

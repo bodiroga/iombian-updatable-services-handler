@@ -1,13 +1,15 @@
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, TypedDict, Union
 
-from google.cloud.firestore_v1 import Client, DocumentSnapshot, Watch
+from google.cloud.firestore_v1 import DocumentSnapshot
 from google.cloud.firestore_v1.watch import ChangeType, DocumentChange
 from proto.datetime_helpers import DatetimeWithNanoseconds
 from semver import Version, compare
 
+# This is done to get type hints and avoid circular imports.
+# Is not necessary, but it helps with type hints.
 if TYPE_CHECKING:
-    from device_handler import DeviceHandler
+    from firestore_device_services_handler import FirestoreDeviceServicesHandler
 
 logger = logging.getLogger(__name__)
 
@@ -19,34 +21,17 @@ class InstalledService(TypedDict):
     env: Dict[str, Any]
 
 
-class ServiceHandler:
-    """Handler of the firestore service.
+class FirestoreServiceUpdateHandler:
+    """Handle the updates of a service by listening to the service versions on firestore and setting the installed service as updatable when the latest version is newer that the installed version."""
 
-    This handler manages the firebase services and the installed services of a device.
-    """
-
-    client: Client
-    """Firestore database client."""
-    name: str
-    """Name of the service."""
-    versions: List[str]
-    """List with the version strings of the service (`["0.1.0", "0.1.1", ...]`)."""
-    installed_fields: Union[InstalledService, None]
-    """Fields of the device installed service."""
-    device_handler: "DeviceHandler"
-    """Parent `DeviceHandler`."""
-    watch: Union[Watch, None]
-    """The `watch` of the `on_snapshot` function."""
+    STOP_DELAY_TIME_S = 0.5
 
     def __init__(
         self,
-        client: Client,
         installed_service_document: DocumentSnapshot,
-        device_handler: "DeviceHandler",
-    ) -> None:
+        device_handler: "FirestoreDeviceServicesHandler",
+    ):
         logger.debug("New service added to installed_services.")
-
-        self.client = client
 
         self.name = installed_service_document.id
         self.versions: List[str] = []
@@ -54,13 +39,14 @@ class ServiceHandler:
         fields_dict = installed_service_document.to_dict()
         self.installed_fields = InstalledService(**fields_dict) if fields_dict else None
 
-        self._installed_version = \
+        self._installed_version = (
             self.installed_fields.get("version") if self.installed_fields else None
-
+        )
         self._latest_version: Union[str, None] = None
 
         self.device_handler = device_handler
-        self.watch: Union[Watch, None] = None
+        self.client = device_handler.client
+        self.subscription = None
 
     @property
     def installed_version(self):
@@ -84,19 +70,19 @@ class ServiceHandler:
 
     def start(self):
         """Start the handler by listening to the services on firestore."""
-        logger.info("Service Handler started.")
-        self.watch = (
+        self.subscription = (
             self.client.collection("services")
             .document(self.name)
             .collection("versions")
             .on_snapshot(self._on_version_change)
         )
+        logger.info(f"{self.name} Update Handler started.")
 
     def stop(self):
         """Stop the handler by stopping the listener."""
-        logger.info("Service Handler stopped.")
-        if self.watch is not None:
-            self.watch.unsubscribe()
+        logger.info(f"{self.name} Update Handler stopped.")
+        if self.subscription is not None:
+            self.subscription.unsubscribe()
 
     def restart(self):
         """Restart the handler. This function just calls to `start()` and `stop()`."""
