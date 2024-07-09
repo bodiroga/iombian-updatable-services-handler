@@ -9,7 +9,7 @@ RestartSec=5
 TimeoutStopSec=5
 
 WorkingDirectory=/opt/iombian-updatable-services-handler
-ExecStart=/opt/iombian-updatable-services-handler/.venv/bin/python /opt/iombian-updatable-services-handler/src/main.py
+ExecStart=/opt/iombian-updatable-services-handler/.venv/bin/python /opt/iombian-updatable-services-handler/main.py
 
 [Install]
 WantedBy=multi-user.target
