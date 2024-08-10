@@ -1,6 +1,6 @@
 import logging
 import threading
-from typing import List
+from typing import List, Dict
 
 from google.cloud.firestore_v1 import DocumentSnapshot
 from google.cloud.firestore_v1.watch import ChangeType, DocumentChange
@@ -25,36 +25,22 @@ class FirestoreDeviceServicesHandler(FirestoreClientHandler):
         device_id: str,
     ):
         super().__init__(api_key, project_id, refresh_token)
-        self.api_key = api_key
-        self.project_id = project_id
-        self.refresh_token = refresh_token
-
         self.device_id = device_id
         self.installed_services: List[FirestoreServiceUpdateHandler] = []
-        self.updatable_services = {}
+        self.updatable_services: Dict[str, str] = {}
+        self.device = None
         self.subscription = None
 
     def start(self):
         """Start the firestore client and the listener of the installed services."""
+        logger.debug("Starting Firestore Device Services Handler.")
         self.initialize_client()
-        self._sync_updatable_services()
-        self.device = (
-            self.client.collection("users")
-            .document(self.user_id)
-            .collection("devices")
-            .document(self.device_id)
-        )
-
-        self.subscription = self.device.collection("installed_services").on_snapshot(
-            self._on_new_installed_service
-        )
-        logger.info("Device Services Handler started.")
 
     def stop(self):
         """Stop the handler by stopping the listener and the firestore client."""
-        logger.info("Device Services Handler stopped.")
+        logger.debug("Stopping Firestore Device Services Handler.")
         for service in self.installed_services:
-            service.stop()
+            threading.Thread(target=service.stop).start()
         self.installed_services = []
 
         if self.subscription is not None:
@@ -68,18 +54,23 @@ class FirestoreDeviceServicesHandler(FirestoreClientHandler):
         self.stop()
         self.start()
 
-    def set_as_updated(self, service: str):
+    def set_as_updated(self, service_name: str):
         """Set the given installed service as updated by removing it from the updatable services."""
-        if self.updatable_services.get(service) is not None:
-            del self.updatable_services[service]
+        if self.updatable_services.get(service_name) is not None:
+            logger.info(f"Setting the '{service_name}' service as updated.")
+            del self.updatable_services[service_name]
             self.device.set(
                 {"updatable_services": self.updatable_services},
                 merge=True,
             )
 
-    def set_as_updatable(self, service: str, version: str):
+    def set_as_updatable(self, service_name: str, version: str):
         """Set the given installed service and version updatable by adding it to the updatable services."""
-        self.updatable_services[service] = version
+        if self.updatable_services.get(service_name) == version:
+            return
+        logger.info(
+            f"Setting the '{service_name}' service as updatable to version '{version}'.")
+        self.updatable_services[service_name] = version
         self.device.set(
             {"updatable_services": self.updatable_services},
             merge=True,
@@ -88,6 +79,17 @@ class FirestoreDeviceServicesHandler(FirestoreClientHandler):
     def on_client_initialized(self):
         """Callback function when the client is initialized."""
         logger.debug("Firestore client initialized")
+        self.device = (
+            self.client.collection("users")
+            .document(self.user_id)
+            .collection("devices")
+            .document(self.device_id)
+        )
+        self._sync_updatable_services()
+
+        self.subscription = self.device.collection("installed_services").on_snapshot(
+            self._on_new_installed_service
+        )
 
     def on_server_not_responding(self):
         """Callback function when the server is not responding."""
@@ -100,32 +102,27 @@ class FirestoreDeviceServicesHandler(FirestoreClientHandler):
         threading.Timer(self.RESTART_DELAY_TIME_S, self.restart).start()
 
     def _sync_updatable_services(self):
-        """Sync the local updatable_services with the updatable_services in firestore."""
-        device = (
-            self.client.collection("users")
-            .document(self.user_id)
-            .collection("devices")
-            .document(self.device_id)
-        )
-        document_dict = device.get().to_dict()
-        if (
-            document_dict is not None
-            and document_dict.get("updatable_services") is not None
-        ):
-            self.updatable_services = document_dict.get("updatable_services")
+        """Sync the updatable_services in Firebase with the local updatable_services."""
+        logger.debug("Syncing updatable services in Firebase locally.")
+        if not self.device:
+            return
+        document_dict = self.device.get().to_dict()
+        if document_dict:
+            self.updatable_services = document_dict.get(
+                "updatable_services", {})
         else:
             self.updatable_services = {}
 
     def _get_service_by_name(self, service_name: str):
         """Get the installed service with the given name."""
         for service in self.installed_services:
-            if service.name == service_name:
+            if service.service_name == service_name:
                 return service
 
     def _remove_service_by_name(self, service_name: str):
         """Remove the installed service with the given name."""
         for index, service in enumerate(self.installed_services):
-            if service.name == service_name:
+            if service.service_name == service_name:
                 service.stop()
                 del self.installed_services[index]
                 break
@@ -148,31 +145,27 @@ class FirestoreDeviceServicesHandler(FirestoreClientHandler):
         """
 
         for change in changes:
-            installed_service: DocumentSnapshot = change.document
-            service_name = installed_service.id
+            installed_service_doc: DocumentSnapshot = change.document
+            service_name = installed_service_doc.id
+            service_version = installed_service_doc.to_dict().get("version")
 
             if change.type == ChangeType.ADDED:
-                logger.debug(f"New {service_name} service installed on device.")
-                service = FirestoreServiceUpdateHandler(
-                    installed_service,
-                    self,
-                )
+                logger.debug(
+                    f"'{service_name}' ({service_version}) service installed notification received.")
+                service = FirestoreServiceUpdateHandler(service_name, self)
                 self.installed_services.append(service)
+                service.update_installed_version(service_version)
                 service.start()
 
             elif change.type == ChangeType.REMOVED:
-                logger.debug(f"{service_name} service removed from device.")
-                service = self._get_service_by_name(service_name)
-                if service:
-                    service.stop()
+                logger.debug(
+                    f"'{service_name}' service removed notification received.")
                 self._remove_service_by_name(service_name)
                 self.set_as_updated(service_name)
 
             elif change.type == ChangeType.MODIFIED:
-                logger.debug(f"Changes on {service_name} service on device.")
+                logger.debug(
+                    f"'{service_name}' ({service_version}) service updated notification received.")
                 service = self._get_service_by_name(service_name)
-                self._remove_service_by_name(service_name)
                 if service:
-                    service.update_fields(installed_service)
-                    service.restart()
-                    self.installed_services.append(service)
+                    service.update_installed_version(service_version)

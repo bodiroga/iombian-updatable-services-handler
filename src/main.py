@@ -21,6 +21,8 @@ def signal_handler(sig, frame):
 
 
 if __name__ == "__main__":
+    logger.info("Starting IoMBian Updatable Services Handler Service")
+
     comm_module = CommunicationModule(host=CONFIG_HOST, port=CONFIG_PORT)
     comm_module.start()
 

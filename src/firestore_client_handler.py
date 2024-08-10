@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from google.cloud.firestore import Client
 from google.cloud.firestore_v1 import watch
 from google.oauth2.credentials import Credentials
@@ -132,13 +130,14 @@ class BidiCustomLogger(logging.Logger):
 
 class ServerResponseMessageHandler(logging.StreamHandler):
 
-    def __init__(self, timeout_s=60, on_server_not_responding=lambda _: None, server_response_msg="recved response.", watchdog_timeout_msg="watchdog timeout"):
+    def __init__(self, timeout_s=60, on_server_not_responding=lambda _: None, server_response_msg="recved response.", watchdog_timeout_msg="watchdog timeout", rst_stream_error_msg="RST_STREAM with error"):
         super().__init__()
         self.timeout_s = timeout_s
         self.on_server_not_responding = on_server_not_responding
         self.server_response_msg = server_response_msg
         self.server_response_last_time = time.time()
         self.watchdog_timeout_msg = watchdog_timeout_msg
+        self.rst_stream_error_msg = rst_stream_error_msg
         self.not_responding_timer = None
         self.setFormatter(logging.Formatter(
             '%(asctime)s %(levelname)-8s - %(name)-16s - %(message)s', None, '%'))
@@ -147,6 +146,9 @@ class ServerResponseMessageHandler(logging.StreamHandler):
         msg = self.format(record)
         if self.watchdog_timeout_msg in msg:
             logger.debug("Server connection timeout detected")
+            threading.Thread(target=self.on_server_not_responding).start()
+        if self.rst_stream_error_msg in msg:
+            logger.error("RST_STREAM error detected")
             threading.Thread(target=self.on_server_not_responding).start()
         if self.server_response_msg in msg:
             logger.debug("Server response message caught ({} seconds)".format(

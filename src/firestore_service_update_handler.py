@@ -1,5 +1,5 @@
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, TypedDict, Union
+from typing import TYPE_CHECKING, List, Union
 
 from google.cloud.firestore_v1 import DocumentSnapshot
 from google.cloud.firestore_v1.watch import ChangeType, DocumentChange
@@ -14,73 +14,41 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class InstalledService(TypedDict):
-    """Dict representing the installed_services structure in firebase."""
-
-    version: str
-    env: Dict[str, Any]
-
-
 class FirestoreServiceUpdateHandler:
-    """Handle the updates of a service by listening to the service versions on firestore and setting the installed service as updatable when the latest version is newer that the installed version."""
+    """Handles the posible version updates of a service 
 
-    STOP_DELAY_TIME_S = 0.5
+    This is done by comparing the installed version to the marketplace versions on Firestore.
+    If the marketplace latest version is newer than the installed on, the service is set as updatable.
+    """
 
     def __init__(
         self,
-        installed_service_document: DocumentSnapshot,
+        service_name: str,
         device_handler: "FirestoreDeviceServicesHandler",
     ):
-        logger.debug("New service added to installed_services.")
+        logger.debug(f"'{service_name}' Service Update Handler created.")
 
-        self.name = installed_service_document.id
-        self.versions: List[str] = []
-
-        fields_dict = installed_service_document.to_dict()
-        self.installed_fields = InstalledService(**fields_dict) if fields_dict else None
-
-        self._installed_version = (
-            self.installed_fields.get("version") if self.installed_fields else None
-        )
-        self._latest_version: Union[str, None] = None
-
+        self.service_name = service_name
         self.device_handler = device_handler
+        self.installed_version = None
+        self.marketplace_versions: List[str] = []
+        self.marketplace_latest_version: Union[str, None] = None
         self.client = device_handler.client
         self.subscription = None
 
-    @property
-    def installed_version(self):
-        """Service version installed on the device."""
-        return self._installed_version
-
-    @installed_version.setter
-    def installed_version(self, version: str):
-        self._installed_version = version
-        self._refresh_updatable_services()
-
-    @property
-    def latest_version(self):
-        """Latest service version available on the marketplace."""
-        return self._latest_version
-
-    @latest_version.setter
-    def latest_version(self, version: str):
-        self._latest_version = version
-        self._refresh_updatable_services()
-
     def start(self):
-        """Start the handler by listening to the services on firestore."""
+        """Start the handler by listening to the marketplace service versions on firestore."""
+        logger.info(f"Starting '{self.service_name}' Service Update Handler.")
         self.subscription = (
             self.client.collection("services")
-            .document(self.name)
+            .document(self.service_name)
             .collection("versions")
             .on_snapshot(self._on_version_change)
         )
-        logger.info(f"{self.name} Update Handler started.")
 
     def stop(self):
         """Stop the handler by stopping the listener."""
-        logger.info(f"{self.name} Update Handler stopped.")
+        logger.info(f"Stopping '{self.service_name}' Service Update Handler.")
         if self.subscription is not None:
             self.subscription.unsubscribe()
 
@@ -89,28 +57,29 @@ class FirestoreServiceUpdateHandler:
         self.stop()
         self.start()
 
-    def update_fields(self, installed_service_document: DocumentSnapshot):
-        """Given the firestore document snapshot of the installed service, update the services `installed_fields`."""
-        self.name = installed_service_document.id
+    def update_installed_version(self, new_version: str):
+        """Update the installed version of the service."""
+        logger.debug(
+            f"'{self.service_name}' service installed version updated to {new_version}.")
+        self.installed_version = new_version
+        self._refresh_updatable_services()
 
-        document_dict = installed_service_document.to_dict()
-        if document_dict is not None:
-            self.installed_fields = InstalledService(**document_dict)
-            self.installed_version = self.installed_fields.get("version")
+    def _update_markeplace_latest_version(self):
+        """Recompute the `latest_version` by comparing the `versions`."""
+        self.marketplace_latest_version = max(
+            self.marketplace_versions, key=Version.parse)
+        self._refresh_updatable_services()
 
     def _refresh_updatable_services(self):
         """Refresh the updatable services of the `device_handler` by comparing `installed_version` and `latest_version`."""
-        if self.latest_version is None or self.installed_version is None:
+        if self.marketplace_latest_version is None or self.installed_version is None:
             return
 
-        if compare(self.latest_version, self.installed_version) == 1:
-            self.device_handler.set_as_updatable(self.name, self.latest_version)
+        if compare(self.marketplace_latest_version, self.installed_version) == 1:
+            self.device_handler.set_as_updatable(
+                self.service_name, self.marketplace_latest_version)
         else:
-            self.device_handler.set_as_updated(self.name)
-
-    def _update_latest_version(self):
-        """Recompute the `latest_version` by comparing the `versions`."""
-        self.latest_version = max(self.versions, key=Version.parse)
+            self.device_handler.set_as_updated(self.service_name)
 
     def _on_version_change(
         self,
@@ -120,19 +89,22 @@ class FirestoreServiceUpdateHandler:
     ):
         """When there is a change on the service versions, update the `versions` and update the latest version.
 
-        This function is an `on_snapshot()` function for the "installed_services" collection of each "device" document.
+        This function is an `on_snapshot()` function for the "versions" collection of each markeplace services.
         This function activates when a change occurs on the collection.
         """
 
         for change in changes:
-            if change.type == ChangeType.ADDED:
-                logger.debug(f"A new version of {self.name} service was added.")
-                new_version = change.document.id
-                if not new_version in self.versions:
-                    self.versions.append(change.document.id)
+            version = change.document.id
+
+            if change.type == ChangeType.ADDED or change.type == ChangeType.MODIFIED:
+                logger.debug(
+                    f"A new version of '{self.service_name}' service has been added: {version}.")
+                if not version in self.marketplace_versions:
+                    self.marketplace_versions.append(version)
 
             elif change.type == ChangeType.REMOVED:
-                logger.debug(f"A version of {self.name} service was removed.")
-                self.versions.remove(change.document.id)
+                logger.debug(
+                    f"A version of '{self.service_name}' service has been removed: {version}.")
+                self.marketplace_versions.remove(version)
 
-            self._update_latest_version()
+            self._update_markeplace_latest_version()
