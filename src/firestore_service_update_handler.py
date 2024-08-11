@@ -38,7 +38,7 @@ class FirestoreServiceUpdateHandler:
 
     def start(self):
         """Start the handler by listening to the marketplace service versions on firestore."""
-        logger.info(f"Starting '{self.service_name}' Service Update Handler.")
+        logger.debug(f"Starting '{self.service_name}' Service Update Handler.")
         self.subscription = (
             self.client.collection("services")
             .document(self.service_name)
@@ -48,7 +48,7 @@ class FirestoreServiceUpdateHandler:
 
     def stop(self):
         """Stop the handler by stopping the listener."""
-        logger.info(f"Stopping '{self.service_name}' Service Update Handler.")
+        logger.debug(f"Stopping '{self.service_name}' Service Update Handler.")
         if self.subscription is not None:
             self.subscription.unsubscribe()
 
